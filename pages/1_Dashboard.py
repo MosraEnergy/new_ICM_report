@@ -416,6 +416,10 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
 
     with c4:
         st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Weekly Stripping Ratio Trend (BCM / MT)</div>', unsafe_allow_html=True)
+        
+        # Explainer for Stripping Ratio Bar Chart
+        st.info("💡 **Stripping Ratio (BCM/MT):** Measures waste moved per ton of coal mined. A higher bar means more overburden was moved relative to coal output.")
+        
         if not df_m.empty:
             df_m["coal_mined"] = df_m["coal_mined"].fillna(0).astype(float)
             df_m["bcm_excavated"] = df_m["bcm_excavated"].fillna(0).astype(float)
@@ -465,6 +469,10 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
 
     # 7. Charts: Row 4 (Full-width Scatterplot — BCM vs Coal Mined)
     st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-top:16px;margin-bottom:6px;">🎯 BCM Excavated vs. Coal Mined Scatterplot</div>', unsafe_allow_html=True)
+    
+    # Explainer for Scatterplot
+    st.info("📌 **Mining Efficiency Matrix:** Compares total BCM excavated (horizontal X-axis) against Coal Mined in MT (vertical Y-axis). **Red points indicate low-efficiency weeks** with high overburden stripping relative to coal recovered (high stripping ratio). Hover over any point to view the exact week date and metrics.")
+
     if not df_m.empty:
         df_m["coal_mined"] = df_m["coal_mined"].fillna(0).astype(float)
         df_m["bcm_excavated"] = df_m["bcm_excavated"].fillna(0).astype(float)
