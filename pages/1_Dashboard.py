@@ -8,7 +8,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import date
+from datetime import date, timedelta
 from utils.db import fetch_all, fetch_one
 
 st.set_page_config(page_title="Dashboard · Mosra Energy", layout="wide")
@@ -282,6 +282,14 @@ def vline(fig, col_name, df):
     if view_mode == "WoW" and not df.empty and selected_ws in df[col_name].values:
         fig.add_vline(x=str(selected_ws), line_dash="dot", line_color="#E63329", line_width=1.5, opacity=0.7)
 
+def format_week_range(ws_val):
+    if isinstance(ws_val, str):
+        ws_dt = pd.to_datetime(ws_val).date()
+    else:
+        ws_dt = ws_val
+    we_dt = ws_dt + timedelta(days=6)
+    return f"{ws_dt.strftime('%d/%m/%Y')}-{we_dt.strftime('%d/%m/%Y')}"
+
 # ════════════════════════════════════════════════════════════════════════════
 # HELPER: RENDER SITE SPECIFIC TAB
 # ════════════════════════════════════════════════════════════════════════════
@@ -473,6 +481,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         df_m["coal_mined"] = df_m["coal_mined"].fillna(0).astype(float)
         df_m["bcm_excavated"] = df_m["bcm_excavated"].fillna(0).astype(float)
         df_m["stripping_ratio"] = np.where(df_m["coal_mined"] > 0, df_m["bcm_excavated"] / df_m["coal_mined"], 0)
+        df_m["week_range_str"] = df_m["week_start_date"].apply(format_week_range)
 
         # Flag high stripping ratio weeks (e.g., SR >= 75th percentile or SR > 8.0)
         sr_threshold = df_m["stripping_ratio"].quantile(0.75) if len(df_m) > 4 else 8.0
@@ -482,7 +491,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         col_scat, col_tbl = st.columns(2)
 
         with col_scat:
-            st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Scatterplot (50% Width)</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;"', unsafe_allow_html=True)
             fig_scatter = go.Figure()
             fig_scatter.add_trace(go.Scatter(
                 x=df_m["bcm_excavated"],
@@ -497,11 +506,11 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
                 textposition="top center",
                 textfont=dict(color="#f87171", size=10, family="Inter, sans-serif"),
                 customdata=np.stack((
-                    df_m["week_start_date"].astype(str),
+                    df_m["week_range_str"],
                     df_m["stripping_ratio"]
                 ), axis=-1),
                 hovertemplate=(
-                    "<b>📅 Week of: %{customdata[0]}</b><br><br>" +
+                    "<b>📅 Period: %{customdata[0]}</b><br><br>" +
                     "⛏️ <b>Coal Mined:</b> %{y:,.1f} MT<br>" +
                     "🚜 <b>BCM Excavated:</b> %{x:,.0f} BCM<br>" +
                     "📊 <b>Stripping Ratio:</b> %{customdata[1]:,.2f} BCM/MT" +
@@ -526,7 +535,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
             if not df_low.empty:
                 rows_html = "".join([
                     f'<tr style="background:{"#1a1d27" if i % 2 == 0 else "#161824"};">'
-                    f'<td style="padding:8px 12px;font-weight:600;color:#f87171;">Week of {row["week_start_date"]}</td>'
+                    f'<td style="padding:8px 12px;font-weight:600;color:#f87171;">{row["week_range_str"]}</td>'
                     f'<td style="padding:8px 12px;text-align:right;color:#f1f5f9;">{row["coal_mined"]:,.1f} MT</td>'
                     f'<td style="padding:8px 12px;text-align:right;color:#f1f5f9;">{row["bcm_excavated"]:,.0f} BCM</td>'
                     f'<td style="padding:8px 12px;text-align:right;font-weight:800;color:#f87171;">{row["stripping_ratio"]:,.2f}</td></tr>'
@@ -537,7 +546,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
                       <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:Inter,sans-serif;">
                         <thead>
                           <tr style="background:#252836;position:sticky;top:0;z-index:1;">
-                            <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Week Start</th>
+                            <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Period (dd/mm/yyyy - dd/mm/yyyy)</th>
                             <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Coal Mined</th>
                             <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">BCM Excavated</th>
                             <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Stripping Ratio</th>
