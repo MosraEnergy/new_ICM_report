@@ -1,7 +1,7 @@
 """
 pages/1_Dashboard.py — Mosra Energy Operations Dashboard
 Dark mode theme. Supports WoW, MoM, YTD, and YoY comparison views.
-Features a 3-tab layout with comprehensive per-site analytics and compact dynamic KPIs.
+Features a 3-tab layout with comprehensive per-site analytics, compact dynamic KPIs, and full-width per-site scatterplots.
 """
 
 import streamlit as st
@@ -283,7 +283,7 @@ def vline(fig, col_name, df):
         fig.add_vline(x=str(selected_ws), line_dash="dot", line_color="#E63329", line_width=1.5, opacity=0.7)
 
 # ════════════════════════════════════════════════════════════════════════════
-# HELPER: RENDER SITE SPECIFIC TAB (Compact Dynamic Flow for KPIs)
+# HELPER: RENDER SITE SPECIFIC TAB (Compact Dynamic Flow for KPIs & Charts)
 # ════════════════════════════════════════════════════════════════════════════
 def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di, prv_di):
     is_ifcm = (site_name == "IFCM")
@@ -297,6 +297,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         mandatory = ["Coal Mined", "Total Coal Stocked", "BCM Excavated", "Coal Sold (Stock Out)", "Sales Revenue", "Total Diesel Used"]
         return val_f > 0 or prv_f > 0 or label in mandatory
 
+    # 1. Dynamic KPI Grid
     kpi_groups = [
         ("Coal Production & Sourcing", [
             ("Coal Mined", cur_m.get("coal_mined"), "MT", prv_m.get("coal_mined"), ""),
@@ -335,7 +336,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
             for col_idx, (label, val, unit, prev, prefix) in enumerate(batch):
                 kpi(cols[col_idx], label, val, unit, prev, prefix, is_ifcm=is_ifcm)
 
-    # 2. Site Dataframes for Charts
+    # 2. Query Site Dataframes for Charts
     p_site = params.copy()
     p_site["site"] = site_name
 
@@ -355,8 +356,10 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         FROM weekly_diesel_usage du WHERE du.dispensed_date >= DATE_TRUNC('year', %(ws)s::date) AND du.dispensed_date <= CURRENT_DATE AND du.site = %(site)s
         GROUP BY 1 ORDER BY 1""", p_site))
 
-    # 3. Charts: Row 1
+    # 3. Detailed Analytics Section Title
     st.markdown(f'<div class="sec-hdr">Detailed Analytics — {site_name}</div>', unsafe_allow_html=True)
+
+    # 4. Charts: Row 1 (Pie Charts)
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f'<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Coal Sourcing Breakdown — {pie_label}</div>', unsafe_allow_html=True)
@@ -398,7 +401,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         else:
             st.markdown('<div class="no-data">No diesel data available.</div>', unsafe_allow_html=True)
 
-    # 4. Charts: Row 2
+    # 5. Charts: Row 2 (Sales & Stripping Ratio)
     c3, c4 = st.columns(2)
     with c3:
         st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Weekly Sales Revenue (₦)</div>', unsafe_allow_html=True)
@@ -434,7 +437,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         else:
             st.markdown('<div class="no-data">No stripping ratio history yet.</div>', unsafe_allow_html=True)
 
-    # 5. Charts: Row 3
+    # 6. Charts: Row 3 (Diesel Consumption & Cumulative Sales)
     c5, c6 = st.columns(2)
     with c5:
         st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Weekly Diesel Consumption</div>', unsafe_allow_html=True)
@@ -460,7 +463,57 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         else:
             st.markdown('<div class="no-data">No cumulative sales history yet.</div>', unsafe_allow_html=True)
 
-    # 6. Equipment Diesel Table
+    # 7. Charts: Row 4 (Full-width Scatterplot — BCM vs Coal Mined)
+    st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-top:16px;margin-bottom:6px;">🎯 BCM Excavated vs. Coal Mined Scatterplot</div>', unsafe_allow_html=True)
+    if not df_m.empty:
+        df_m["coal_mined"] = df_m["coal_mined"].fillna(0).astype(float)
+        df_m["bcm_excavated"] = df_m["bcm_excavated"].fillna(0).astype(float)
+        df_m["stripping_ratio"] = np.where(df_m["coal_mined"] > 0, df_m["bcm_excavated"] / df_m["coal_mined"], 0)
+
+        # Flag high stripping ratio weeks (e.g., SR >= 75th percentile or SR > 8.0) in red
+        sr_threshold = df_m["stripping_ratio"].quantile(0.75) if len(df_m) > 4 else 8.0
+        colors = ["#f87171" if sr >= sr_threshold and sr > 0 else "#60a5fa" for sr in df_m["stripping_ratio"]]
+        sizes = [14 if sr >= sr_threshold and sr > 0 else 9 for sr in df_m["stripping_ratio"]]
+
+        fig_scatter = go.Figure()
+        fig_scatter.add_trace(go.Scatter(
+            x=df_m["bcm_excavated"],
+            y=df_m["coal_mined"],
+            mode="markers+text",
+            marker=dict(
+                size=sizes,
+                color=colors,
+                line=dict(width=1.5, color="#1e2130")
+            ),
+            text=[f"SR: {sr:.1f}" if sr >= sr_threshold and sr > 0 else "" for sr in df_m["stripping_ratio"]],
+            textposition="top center",
+            textfont=dict(color="#f87171", size=10, family="Inter, sans-serif"),
+            customdata=np.stack((
+                df_m["week_start_date"].astype(str),
+                df_m["stripping_ratio"]
+            ), axis=-1),
+            hovertemplate=(
+                "<b>📅 Week of: %{customdata[0]}</b><br><br>" +
+                "⛏️ <b>Coal Mined:</b> %{y:,.1f} MT<br>" +
+                "🚜 <b>BCM Excavated:</b> %{x:,.0f} BCM<br>" +
+                "📊 <b>Stripping Ratio:</b> %{customdata[1]:,.2f} BCM/MT" +
+                "<extra></extra>"
+            )
+        ))
+
+        fig_scatter.update_layout(
+            **LAY,
+            height=420,
+            xaxis_title="BCM Excavated (Overburden Stripping)",
+            yaxis_title="Coal Mined (MT)",
+            showlegend=False
+        )
+
+        st.plotly_chart(fig_scatter, use_container_width=True)
+    else:
+        st.markdown('<div class="no-data">No BCM vs. Coal Mining data available yet.</div>', unsafe_allow_html=True)
+
+    # 8. Equipment Diesel Table
     st.markdown('<div class="sec-hdr">🚜 Equipment Diesel Usage</div>', unsafe_allow_html=True)
     df_eq = pd.DataFrame(fetch_all(f"""
         SELECT du.equipment_name AS equipment, COALESCE(NULLIF(TRIM(du.equipment_type),''), 'UNKNOWN') AS equipment_type, SUM(du.litres) AS litres
