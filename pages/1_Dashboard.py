@@ -546,7 +546,7 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
                       <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:Inter,sans-serif;">
                         <thead>
                           <tr style="background:#252836;position:sticky;top:0;z-index:1;">
-                            <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Period (dd/mm/yyyy - dd/mm/yyyy)</th>
+                            <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Period</th>
                             <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Coal Mined</th>
                             <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">BCM Excavated</th>
                             <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Stripping Ratio</th>
