@@ -1,7 +1,7 @@
 """
 pages/1_Dashboard.py — Mosra Energy Operations Dashboard
 Dark mode theme. Supports WoW, MoM, YTD, and YoY comparison views.
-Features a 3-tab layout with comprehensive per-site analytics, compact dynamic KPIs, and full-width per-site scatterplots.
+Features a 3-tab layout with comprehensive per-site analytics, compact dynamic KPIs, and a split-width mining efficiency analysis section.
 """
 
 import streamlit as st
@@ -283,7 +283,7 @@ def vline(fig, col_name, df):
         fig.add_vline(x=str(selected_ws), line_dash="dot", line_color="#E63329", line_width=1.5, opacity=0.7)
 
 # ════════════════════════════════════════════════════════════════════════════
-# HELPER: RENDER SITE SPECIFIC TAB (Compact Dynamic Flow for KPIs & Charts)
+# HELPER: RENDER SITE SPECIFIC TAB
 # ════════════════════════════════════════════════════════════════════════════
 def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di, prv_di):
     is_ifcm = (site_name == "IFCM")
@@ -416,8 +416,6 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
 
     with c4:
         st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Weekly Stripping Ratio Trend (BCM / MT)</div>', unsafe_allow_html=True)
-        
-        # Explainer for Stripping Ratio Bar Chart
         st.info("💡 **Stripping Ratio (BCM/MT):** Measures waste moved per ton of coal mined. A higher bar means more overburden was moved relative to coal output.")
         
         if not df_m.empty:
@@ -467,57 +465,90 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
         else:
             st.markdown('<div class="no-data">No cumulative sales history yet.</div>', unsafe_allow_html=True)
 
-    # 7. Charts: Row 4 (Full-width Scatterplot — BCM vs Coal Mined)
-    st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-top:16px;margin-bottom:6px;">🎯 BCM Excavated vs. Coal Mined Scatterplot</div>', unsafe_allow_html=True)
-    
-    # Explainer for Scatterplot
-    st.info("📌 **Mining Efficiency Matrix:** Compares total BCM excavated (horizontal X-axis) against Coal Mined in MT (vertical Y-axis). **Red points indicate low-efficiency weeks** with high overburden stripping relative to coal recovered (high stripping ratio). Hover over any point to view the exact week date and metrics.")
+    # 7. Split Section: BCM vs Coal Mined Scatterplot (50%) + Low Efficiency Table (50%)
+    st.markdown('<div class="sec-hdr">🎯 Mining Efficiency Matrix — BCM vs Coal Mined</div>', unsafe_allow_html=True)
+    st.info("📌 **Efficiency Matrix:** Compares total BCM excavated (horizontal X-axis) against Coal Mined in MT (vertical Y-axis). **Red points indicate low-efficiency weeks** with high overburden stripping relative to coal recovered (high stripping ratio).")
 
     if not df_m.empty:
         df_m["coal_mined"] = df_m["coal_mined"].fillna(0).astype(float)
         df_m["bcm_excavated"] = df_m["bcm_excavated"].fillna(0).astype(float)
         df_m["stripping_ratio"] = np.where(df_m["coal_mined"] > 0, df_m["bcm_excavated"] / df_m["coal_mined"], 0)
 
-        # Flag high stripping ratio weeks (e.g., SR >= 75th percentile or SR > 8.0) in red
+        # Flag high stripping ratio weeks (e.g., SR >= 75th percentile or SR > 8.0)
         sr_threshold = df_m["stripping_ratio"].quantile(0.75) if len(df_m) > 4 else 8.0
         colors = ["#f87171" if sr >= sr_threshold and sr > 0 else "#60a5fa" for sr in df_m["stripping_ratio"]]
         sizes = [14 if sr >= sr_threshold and sr > 0 else 9 for sr in df_m["stripping_ratio"]]
 
-        fig_scatter = go.Figure()
-        fig_scatter.add_trace(go.Scatter(
-            x=df_m["bcm_excavated"],
-            y=df_m["coal_mined"],
-            mode="markers+text",
-            marker=dict(
-                size=sizes,
-                color=colors,
-                line=dict(width=1.5, color="#1e2130")
-            ),
-            text=[f"SR: {sr:.1f}" if sr >= sr_threshold and sr > 0 else "" for sr in df_m["stripping_ratio"]],
-            textposition="top center",
-            textfont=dict(color="#f87171", size=10, family="Inter, sans-serif"),
-            customdata=np.stack((
-                df_m["week_start_date"].astype(str),
-                df_m["stripping_ratio"]
-            ), axis=-1),
-            hovertemplate=(
-                "<b>📅 Week of: %{customdata[0]}</b><br><br>" +
-                "⛏️ <b>Coal Mined:</b> %{y:,.1f} MT<br>" +
-                "🚜 <b>BCM Excavated:</b> %{x:,.0f} BCM<br>" +
-                "📊 <b>Stripping Ratio:</b> %{customdata[1]:,.2f} BCM/MT" +
-                "<extra></extra>"
+        col_scat, col_tbl = st.columns(2)
+
+        with col_scat:
+            st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">Scatterplot (50% Width)</div>', unsafe_allow_html=True)
+            fig_scatter = go.Figure()
+            fig_scatter.add_trace(go.Scatter(
+                x=df_m["bcm_excavated"],
+                y=df_m["coal_mined"],
+                mode="markers+text",
+                marker=dict(
+                    size=sizes,
+                    color=colors,
+                    line=dict(width=1.5, color="#1e2130")
+                ),
+                text=[f"SR: {sr:.1f}" if sr >= sr_threshold and sr > 0 else "" for sr in df_m["stripping_ratio"]],
+                textposition="top center",
+                textfont=dict(color="#f87171", size=10, family="Inter, sans-serif"),
+                customdata=np.stack((
+                    df_m["week_start_date"].astype(str),
+                    df_m["stripping_ratio"]
+                ), axis=-1),
+                hovertemplate=(
+                    "<b>📅 Week of: %{customdata[0]}</b><br><br>" +
+                    "⛏️ <b>Coal Mined:</b> %{y:,.1f} MT<br>" +
+                    "🚜 <b>BCM Excavated:</b> %{x:,.0f} BCM<br>" +
+                    "📊 <b>Stripping Ratio:</b> %{customdata[1]:,.2f} BCM/MT" +
+                    "<extra></extra>"
+                )
+            ))
+
+            fig_scatter.update_layout(
+                **LAY,
+                height=380,
+                xaxis_title="BCM Excavated",
+                yaxis_title="Coal Mined (MT)",
+                showlegend=False
             )
-        ))
+            st.plotly_chart(fig_scatter, use_container_width=True)
 
-        fig_scatter.update_layout(
-            **LAY,
-            height=420,
-            xaxis_title="BCM Excavated (Overburden Stripping)",
-            yaxis_title="Coal Mined (MT)",
-            showlegend=False
-        )
+        with col_tbl:
+            st.markdown('<div style="color:#94a3b8;font-size:12px;font-weight:600;margin-bottom:6px;">⚠️ Flagged Low-Efficiency Weeks</div>', unsafe_allow_html=True)
+            df_low = df_m[(df_m["stripping_ratio"] >= sr_threshold) & (df_m["stripping_ratio"] > 0)].copy()
+            df_low = df_low.sort_values(by="stripping_ratio", ascending=False)
 
-        st.plotly_chart(fig_scatter, use_container_width=True)
+            if not df_low.empty:
+                rows_html = "".join([
+                    f'<tr style="background:{"#1a1d27" if i % 2 == 0 else "#161824"};">'
+                    f'<td style="padding:8px 12px;font-weight:600;color:#f87171;">Week of {row["week_start_date"]}</td>'
+                    f'<td style="padding:8px 12px;text-align:right;color:#f1f5f9;">{row["coal_mined"]:,.1f} MT</td>'
+                    f'<td style="padding:8px 12px;text-align:right;color:#f1f5f9;">{row["bcm_excavated"]:,.0f} BCM</td>'
+                    f'<td style="padding:8px 12px;text-align:right;font-weight:800;color:#f87171;">{row["stripping_ratio"]:,.2f}</td></tr>'
+                    for i, (_, row) in enumerate(df_low.iterrows())
+                ])
+                st.markdown(f"""
+                    <div style="overflow-y:auto;max-height:340px;border-radius:10px;border:1px solid #2a2d3a;margin-top:6px;">
+                      <table style="width:100%;border-collapse:collapse;font-size:12px;font-family:Inter,sans-serif;">
+                        <thead>
+                          <tr style="background:#252836;position:sticky;top:0;z-index:1;">
+                            <th style="padding:8px 12px;text-align:left;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Week Start</th>
+                            <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Coal Mined</th>
+                            <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">BCM Excavated</th>
+                            <th style="padding:8px 12px;text-align:right;color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;">Stripping Ratio</th>
+                          </tr>
+                        </thead>
+                        <tbody>{rows_html}</tbody>
+                      </table>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="no-data">No low-efficiency weeks flagged for this period.</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="no-data">No BCM vs. Coal Mining data available yet.</div>', unsafe_allow_html=True)
 
