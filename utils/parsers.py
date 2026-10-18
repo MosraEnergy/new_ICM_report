@@ -484,13 +484,28 @@ def _dieselstock_site(frame):
 def _dieselstock_activity(value):
     raw = _clean_optional_text(value)
     if raw is None:
-        return None, None, "UNSPECIFIED"
-    match = re.match(r"^([A-Z]{2})\s*(?:-|–|—)\s*(.+)$", raw, flags=re.I)
+        return None, None, "UNSPECIFIED", "Missing activity code; retained as unassigned."
+    match = re.match(r"^([A-Z]{2})\s*(?:-|–|—)", raw, flags=re.I)
     code = match.group(1).upper() if match else raw.strip().upper()
     operation_type = DIESEL_ACTIVITY_CODE_MAP.get(code)
-    if operation_type is None:
-        raise ValueError(f"Unknown DieselStock activity code: {raw!r}")
-    return raw, code, operation_type
+    if operation_type is not None:
+        return raw, code, operation_type, None
+
+    # IFCM's first completed template contains some legacy free-text operation
+    # names. Preserve their source text and normalize the names we already know.
+    cleaned = re.sub(r"\s+", " ", raw.strip().upper())
+    normalized = _normalise_op_type(raw)
+    if cleaned in OPERATION_TYPO_MAP:
+        return raw, None, normalized, (
+            f"Legacy activity {raw!r} normalized to {normalized!r}."
+        )
+
+    # A new or mistyped activity must not make valid fuel disappear. It is
+    # retained for review under UNSPECIFIED, with the original text available
+    # in activity_code_raw.
+    return raw, None, "UNSPECIFIED", (
+        f"Unknown activity {raw!r}; retained as unassigned."
+    )
 
 
 def _dieselstock_time(value):
@@ -569,9 +584,8 @@ def parse_diesel_excel_new(file_bytes: bytes, site: str | None = None):
             continue
         try:
             dispensed_date = _diesel_date(row.get("date"))
-            dispensed_time = _dieselstock_time(row.get("time"))
             litres = _diesel_litres(row.get("litres_dispensed"))
-            activity_code_raw, activity_code, operation_type = _dieselstock_activity(
+            activity_code_raw, activity_code, operation_type, activity_warning = _dieselstock_activity(
                 row.get("activity_code")
             )
         except ValueError as exc:
@@ -579,6 +593,17 @@ def parse_diesel_excel_new(file_bytes: bytes, site: str | None = None):
             continue
         if litres <= 0:
             continue
+
+        try:
+            dispensed_time = _dieselstock_time(row.get("time"))
+        except ValueError:
+            dispensed_time = None
+            warnings.append(
+                f"Dispensing log row {row_number}: Invalid time "
+                f"{row.get('time')!r}; retained with a blank time."
+            )
+        if activity_warning:
+            warnings.append(f"Dispensing log row {row_number}: {activity_warning}")
 
         asset_id = _clean_optional_text(row.get("asset_id"), uppercase=True)
         if asset_id is None:
