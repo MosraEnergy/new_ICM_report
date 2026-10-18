@@ -57,17 +57,79 @@ CREATE TABLE IF NOT EXISTS weekly_diesel_usage (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Safely add the unique constraint if it doesn't exist
+-- Preserve repeated, equal dispensing events within the master log.
+ALTER TABLE weekly_diesel_usage
+    ADD COLUMN IF NOT EXISTS occurrence INTEGER NOT NULL DEFAULT 1 CHECK (occurrence > 0);
+
+-- Replace the old value-only identity, which silently discarded equal events.
 DO $$ 
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_diesel_row') THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_diesel_row_occurrence'
+                   AND conrelid = 'weekly_diesel_usage'::regclass) THEN
         ALTER TABLE weekly_diesel_usage 
-        ADD CONSTRAINT uq_diesel_row UNIQUE NULLS NOT DISTINCT (site, dispensed_date, equipment_name, operation_type, litres);
+        ADD CONSTRAINT uq_diesel_row_occurrence UNIQUE NULLS NOT DISTINCT
+            (site, dispensed_date, equipment_name, operation_type, litres, occurrence);
     END IF;
 END $$;
+ALTER TABLE weekly_diesel_usage DROP CONSTRAINT IF EXISTS uq_diesel_row;
 
 CREATE INDEX IF NOT EXISTS idx_diesel_site_date ON weekly_diesel_usage (site, dispensed_date);
 CREATE INDEX IF NOT EXISTS idx_diesel_week_start ON weekly_diesel_usage (site, week_start_date);
+
+-- DieselStock template transactions. Kept separate from historical imports.
+CREATE TABLE IF NOT EXISTS diesel_dispensing_log (
+    id                  BIGSERIAL PRIMARY KEY,
+    site                VARCHAR(10) NOT NULL CHECK (site IN ('IFCM', 'TRCM')),
+    dispensed_date      DATE NOT NULL,
+    dispensed_time      TIME,
+    week_start_date     DATE GENERATED ALWAYS AS (
+        (dispensed_date - INTERVAL '1 day' * EXTRACT(DOW FROM dispensed_date)::integer)::date
+    ) STORED,
+    asset_id            TEXT,
+    equipment_class     TEXT,
+    meter_type          TEXT,
+    meter_reading       NUMERIC(14,2),
+    litres              NUMERIC(12,2) NOT NULL CHECK (litres > 0),
+    activity_code       VARCHAR(10),
+    activity_code_raw   TEXT,
+    operation_type      TEXT NOT NULL,
+    is_haulage          BOOLEAN NOT NULL DEFAULT FALSE,
+    operator_driver     TEXT,
+    fuel_attendant      TEXT,
+    supervisor_sign_off TEXT,
+    check_status        TEXT,
+    occurrence          INTEGER NOT NULL DEFAULT 1 CHECK (occurrence > 0),
+    source_filename     VARCHAR(255),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_dieselstock_row UNIQUE NULLS NOT DISTINCT
+        (site, dispensed_date, dispensed_time, asset_id,
+         activity_code, litres, occurrence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dieselstock_site_date
+    ON diesel_dispensing_log (site, dispensed_date);
+CREATE INDEX IF NOT EXISTS idx_dieselstock_week_start
+    ON diesel_dispensing_log (site, week_start_date);
+
+-- Stock-reconciliation portion of the DieselStock Weekly summary sheet.
+CREATE TABLE IF NOT EXISTS diesel_weekly_summary (
+    id                    BIGSERIAL PRIMARY KEY,
+    site                  VARCHAR(10) NOT NULL CHECK (site IN ('IFCM', 'TRCM')),
+    week_start_date       DATE NOT NULL,
+    week_end_date         DATE NOT NULL,
+    opening_dip_litres    NUMERIC(12,2),
+    received_litres       NUMERIC(12,2),
+    dispensed_log_litres  NUMERIC(12,2) NOT NULL,
+    book_closing_litres   NUMERIC(12,2),
+    closing_dip_litres    NUMERIC(12,2),
+    variance_litres       NUMERIC(12,2),
+    variance_percent      NUMERIC(12,6),
+    source_filename       VARCHAR(255),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_diesel_summary_site_week UNIQUE (site, week_start_date),
+    CONSTRAINT chk_diesel_summary_week
+        CHECK (week_end_date = week_start_date + INTERVAL '6 days')
+);
 
 -- ==========================================
 -- 2. COAL INVENTORY MODULE

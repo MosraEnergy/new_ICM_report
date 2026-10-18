@@ -113,10 +113,28 @@ Use the **sidebar navigation** to access each section:
 |---|---|
 | 📊 Dashboard | KPIs, charts, YTD summaries |
 | 🪨 Upload Coal Report | Weekly coal stock inventory |
-| ⛽ Upload Diesel Log | Master diesel dispensing log |
+| ⛽ Upload Diesel | New DieselStock template (`Dispensing log` + `Weekly summary`) |
+| 🗄️ Upload Diesel Old | Historical master diesel files only |
 | ✏️ Manual Entry | Operational metrics & client dispatch |
 
 ---
 **Sites covered:** IFCM (Idowu Falola Coal Mines) · TRCM (Tunde Ramos Coal Mines)  
 **Data period:** 1 Jan 2026 – present  
 """)
+
+st.markdown('<div class="section-header">Diesel Uploads</div>', unsafe_allow_html=True)
+new_upload, old_upload = st.columns(2)
+with new_upload:
+    st.page_link(
+        "pages/3_Upload_Diesel.py",
+        label="⛽ Open DieselStock uploader",
+        help="Primary uploader for the new DieselStock workbook.",
+        use_container_width=True,
+    )
+with old_upload:
+    st.page_link(
+        "pages/3_Upload_Diesel_old.py",
+        label="🗄️ Open legacy diesel uploader",
+        help="Use only for historical diesel templates.",
+        use_container_width=True,
+    )
