@@ -6,6 +6,9 @@ Data extraction and cleaning helpers for Mosra Energy Excel/CSV uploads.
 import pandas as pd
 import re
 import io
+import math
+from numbers import Real
+from collections import Counter
 
 OPERATION_TYPO_MAP: dict[str, str] = {
     # OB & Overburden
@@ -124,11 +127,13 @@ OPERATION_TYPO_MAP: dict[str, str] = {
 
 def _normalise_op_type(raw: str) -> str:
     """Standardizes casing, strips whitespace, and maps typos to canonical operation names."""
-    if pd.isna(raw) or raw in ("NAN", "NONE", ""):
+    if pd.isna(raw):
         return "UNSPECIFIED"
     
     # 1. Strip whitespace, collapse extra inner spaces, uppercase
     cleaned = re.sub(r'\s+', ' ', str(raw).strip().upper())
+    if cleaned in ("NAN", "NONE", ""):
+        return "UNSPECIFIED"
     
     # 2. Check explicitly mapped lookup table
     if cleaned in OPERATION_TYPO_MAP:
@@ -231,31 +236,91 @@ def parse_coal_excel(file_bytes: bytes):
 
     return rows, warnings
 
-def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, bool]):
+def _diesel_header(value):
+    return re.sub(r"\s+", "_", str(value).strip().lower())
+
+
+def _diesel_table(file_bytes, site):
+    """Select a raw-data sheet, never a pivot/summary or another site's data."""
+    stream = io.BytesIO(file_bytes)
+    if file_bytes.startswith((b"PK", b"\xd0\xcf\x11\xe0")):
+        # Let pandas choose openpyxl for xlsx and xlrd for legacy xls.
+        with pd.ExcelFile(stream) as workbook:
+            sheets = {name: pd.read_excel(workbook, sheet_name=name, header=None)
+                      for name in workbook.sheet_names}
+    else:
+        sheets = {"CSV": pd.read_csv(stream, header=None)}
+
+    candidates = []
+    for name, frame in sheets.items():
+        for idx, row in frame.iterrows():
+            headers = {_diesel_header(v) for v in row.dropna()}
+            if (headers & {"date", "dispensed_date"}
+                    and headers & {"equipment", "equipment_name"}
+                    and headers & {"diesel_dispensed", "litres", "qty"}
+                    and headers & {"operation", "operation_type"}):
+                named_sites = set(re.findall(r"\b(?:TRCM|IFCM)\b", name.upper()))
+                if named_sites and site not in named_sites:
+                    break
+                candidates.append((name, frame, idx, site in named_sites))
+                break
+    preferred = [candidate for candidate in candidates if candidate[3]]
+    candidates = preferred or candidates
+    if len(candidates) != 1:
+        raise ValueError(
+            f"Expected one dispensing sheet for {site}; found "
+            f"{[c[0] for c in candidates]}. Supply one complete raw-data sheet "
+            "with DATE, EQUIPMENT, DIESEL DISPENSED and OPERATION TYPE headers."
+        )
+    name, frame, header_idx, _ = candidates[0]
+    excluded = [sheet for sheet in sheets if sheet != name]
+    notices = []
+    if excluded:
+        notices.append(
+            f"Reading '{name}' only. Excluded sheets: {', '.join(excluded)}. "
+            "If any are continuation logs, combine them into one raw-data sheet before uploading."
+        )
+    return frame, header_idx, notices
+
+
+def _diesel_date(value):
+    if pd.isna(value):
+        raise ValueError("Missing date")
+    if isinstance(value, Real):
+        parsed = pd.to_datetime(value, unit="D", origin="1899-12-30")
+    elif isinstance(value, str) and re.fullmatch(r"\d{5}(?:\.\d+)?", value.strip()):
+        parsed = pd.to_datetime(float(value), unit="D", origin="1899-12-30")
+    elif isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}(?:$|[ T])", value.strip()):
+        parsed = pd.Timestamp(value.strip())
+    else:
+        parsed = pd.to_datetime(value, dayfirst=True)
+    if pd.isna(parsed):
+        raise ValueError("Missing date")
+    return parsed.date()
+
+
+def _diesel_litres(value):
+    """Accept numbers and explicit litre units, without changing signs or digits."""
+    cleaned = str(value).strip()
+    cleaned = re.sub(r"\s*(?:litres?|liters?|l)\s*$", "", cleaned, flags=re.I)
+    if not re.fullmatch(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", cleaned):
+        raise ValueError("Invalid litres")
+    result = float(cleaned.replace(",", ""))
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("Litres must be finite and non-negative")
+    return result
+
+
+def parse_diesel_excel_old(file_bytes: bytes, site: str, existing_cls: dict[str, bool]):
     """
     Parses daily diesel dispensing logs (Excel/CSV).
     Handles messy headers, merged date cells, numeric string cleaning,
     and returns clean dictionary records ready for database transactions.
     """
-    file_stream = io.BytesIO(file_bytes)
-    
-    # 1. Read file exactly ONCE into memory without fixed headers
-    try:
-        df_raw = pd.read_excel(file_stream, engine="openpyxl", header=None)
-    except Exception:
-        file_stream.seek(0)
-        df_raw = pd.read_csv(file_stream, header=None)
-
-    # 2. Dynamically locate the true header row
-    header_idx = None
-    for i, row in df_raw.iterrows():
-        row_str = " ".join([str(x).upper() for x in row.dropna()])
-        if "DATE" in row_str and "EQUIPMENT" in row_str:
-            header_idx = i
-            break
-            
-    if header_idx is None:
-        header_idx = 1 if df_raw.iloc[0].isna().all() else 0
+    site = site.strip().upper()
+    if site not in {"TRCM", "IFCM"}:
+        raise ValueError(f"Unknown site: {site}")
+    df_raw, header_idx, warnings = _diesel_table(file_bytes, site)
 
     # 3. Extract column names and slice the DataFrame directly in memory
     raw_headers = df_raw.iloc[header_idx].fillna("").astype(str).tolist()
@@ -263,7 +328,7 @@ def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, boo
     df.columns = raw_headers
 
     # 4. Standardize Column Headers
-    df.columns = [str(c).strip().lower().replace(" ", "_").replace("\n", "_") for c in df.columns]
+    df.columns = [_diesel_header(c) for c in df.columns]
 
     col_mapping = {
         "date": "dispensed_date",
@@ -275,12 +340,12 @@ def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, boo
         "operation_type": "operation_type",
         "diesel_dispensed": "litres",
         "litres": "litres",
-        "qty": "litres"
+        "qty": "litres",
+        "mine": "site",
     }
     
     df = df.rename(columns=lambda x: col_mapping.get(x, x))
 
-    warnings = []
     required_cols = ["dispensed_date", "equipment_name", "operation_type", "litres"]
     missing_cols = [c for c in required_cols if c not in df.columns]
     
@@ -289,8 +354,15 @@ def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, boo
             f"Missing required columns in file: {missing_cols}. Found: {list(df.columns)}"
         )
 
+    if any(list(df.columns).count(c) > 1 for c in required_cols + ["site"]):
+        raise ValueError("Duplicate diesel column headers; use one column per field.")
+
+    if "site" in df.columns:
+        row_sites = df["site"].astype("string").str.strip().str.upper()
+        df = df[row_sites.eq(site).fillna(False)].copy()
+
     # 5. Forward-fill dates to capture rows beneath Excel merged cells
-    df["dispensed_date"] = df["dispensed_date"].ffill()
+    df["dispensed_date"] = df["dispensed_date"].infer_objects(copy=False).ffill()
     df = df.dropna(subset=["litres"])
 
     dispense_rows = []
@@ -298,25 +370,32 @@ def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, boo
 
     # 6. Row-by-row cleaning and type conversions
     for idx, row in df.iterrows():
+        row_number = header_idx + idx + 2
+        labels = [str(row[c]).strip().upper() for c in
+                  ("dispensed_date", "equipment_name", "operation_type")]
+        if any(re.fullmatch(r"(?:GRAND\s+TOTAL|SUB\s*TOTAL|TOTAL)(?:\s*\(L\))?", v)
+               for v in labels):
+            warnings.append(f"Row {row_number}: Summary row excluded.")
+            continue
         try:
-            d_date = pd.to_datetime(row["dispensed_date"], dayfirst=True).date()
+            d_date = _diesel_date(row["dispensed_date"])
         except Exception:
-            warnings.append(f"Row {idx+2}: Invalid date format '{row['dispensed_date']}'. Skipped.")
+            warnings.append(f"Row {row_number}: Invalid date format '{row['dispensed_date']}'. Skipped.")
             continue
 
         raw_litres = str(row["litres"])
-        clean_litres_str = re.sub(r"[^\d.]", "", raw_litres)
         try:
-            litres_val = float(clean_litres_str)
+            litres_val = _diesel_litres(raw_litres)
             if litres_val <= 0:
                 continue
         except ValueError:
-            warnings.append(f"Row {idx+2}: Invalid litres value '{raw_litres}'. Skipped.")
+            warnings.append(f"Row {row_number}: Invalid litres value '{raw_litres}'. Skipped.")
             continue
 
         equip_name = str(row["equipment_name"]).strip().upper()
         if equip_name in ("NAN", "", "NONE"):
-            continue
+            equip_name = None
+            warnings.append(f"Row {row_number}: Missing equipment; retained {litres_val:g} L as unassigned.")
             
         equip_type = str(row.get("equipment_type", "")).strip().upper()
         if equip_type in ("NAN", "NONE"):
@@ -333,10 +412,10 @@ def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, boo
 
             # Register unseen operation types automatically
             if is_haulage is None:
-                is_haulage = False 
+                is_haulage = op_type == "HAULAGE"
                 new_op_types_dict[op_type] = {
                     "operation_type_raw": op_type,
-                    "is_haulage": False,
+                    "is_haulage": is_haulage,
                     "overridden_by_user": False
                 }
 
@@ -351,5 +430,232 @@ def parse_diesel_excel(file_bytes: bytes, site: str, existing_cls: dict[str, boo
             "source_filename": getattr(file_bytes, "name", "upload")
         })
 
+    # Equal dispensing amounts on the same day can be separate transactions.
+    # Retain their multiplicity while giving repeat uploads a stable identity.
+    occurrences = Counter()
+    for record in dispense_rows:
+        key = tuple(record[c] for c in
+                    ("site", "dispensed_date", "equipment", "operation_type", "litres"))
+        occurrences[key] += 1
+        record["occurrence"] = occurrences[key]
     new_op_types = list(new_op_types_dict.values())
     return dispense_rows, [], new_op_types, warnings
+
+
+# DieselStock activity codes mapped to the canonical operation names already
+# used by the historical diesel table and dashboard.
+DIESEL_ACTIVITY_CODE_MAP: dict[str, str] = {
+    "OB": "OB OPERATION",
+    "CM": "COAL MINING",
+    "CL": "COAL LOADING",
+    "CR": "CRUSHER PLANT",
+    "RD": "CIVIL WORK",
+    "PW": "POWER SUPPLY",
+    "DW": "HIGHWALL DEWATERING",
+    "HL": "HAULAGE",
+    "WS": "MAINTENANCE",
+    "ST": "STAFF TRANSPORT",
+    "LC": "LOCAL MINERS COAL PURCHASE",
+    "HW": "HIGHWALL MINING",
+    "OT": "OTHER",
+}
+
+
+def _clean_optional_text(value, uppercase=False):
+    if pd.isna(value) or not str(value).strip():
+        return None
+    cleaned = re.sub(r"\s+", " ", str(value).strip())
+    return cleaned.upper() if uppercase else cleaned
+
+
+def _dieselstock_site(frame):
+    """Read the site value from the metadata rows above the dispensing header."""
+    for _, row in frame.head(5).iterrows():
+        values = list(row)
+        for index, value in enumerate(values[:-1]):
+            if str(value).strip().upper() == "SITE":
+                site = _clean_optional_text(values[index + 1], uppercase=True)
+                if site in {"TRCM", "IFCM"}:
+                    return site
+                raise ValueError(f"Unknown site in DieselStock workbook: {site!r}")
+    raise ValueError("DieselStock workbook does not identify its site in the Dispensing log.")
+
+
+def _dieselstock_activity(value):
+    raw = _clean_optional_text(value)
+    if raw is None:
+        return None, None, "UNSPECIFIED"
+    match = re.match(r"^([A-Z]{2})\s*(?:-|–|—)\s*(.+)$", raw, flags=re.I)
+    code = match.group(1).upper() if match else raw.strip().upper()
+    operation_type = DIESEL_ACTIVITY_CODE_MAP.get(code)
+    if operation_type is None:
+        raise ValueError(f"Unknown DieselStock activity code: {raw!r}")
+    return raw, code, operation_type
+
+
+def _dieselstock_time(value):
+    if pd.isna(value) or value == "":
+        return None
+    parsed = pd.to_datetime(str(value), errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError("Invalid time")
+    return parsed.time().replace(microsecond=0)
+
+
+def parse_diesel_excel_new(file_bytes: bytes, site: str | None = None):
+    """Parse a DieselStock workbook's Dispensing log and Weekly summary.
+
+    ``site`` is optional because the new template contains its own site field. If
+    supplied (for example, from an upload-page selector), it is used as a safety
+    check and must match the workbook. Returns ``(dispensing_rows, summary,
+    warnings)``. Every dispensing row contains a ``site`` value.
+    """
+    selected_site = site.strip().upper() if site else None
+    if selected_site and selected_site not in {"TRCM", "IFCM"}:
+        raise ValueError(f"Unknown selected site: {selected_site}")
+
+    try:
+        with pd.ExcelFile(io.BytesIO(file_bytes)) as workbook:
+            sheet_lookup = {name.strip().lower(): name for name in workbook.sheet_names}
+            missing = [name for name in ("dispensing log", "weekly summary")
+                       if name not in sheet_lookup]
+            if missing:
+                raise ValueError(
+                    "DieselStock workbook is missing required sheet(s): "
+                    + ", ".join(missing)
+                )
+            log_raw = pd.read_excel(
+                workbook, sheet_name=sheet_lookup["dispensing log"], header=None
+            )
+            summary_raw = pd.read_excel(
+                workbook, sheet_name=sheet_lookup["weekly summary"], header=None
+            )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"Could not read DieselStock workbook: {exc}") from exc
+
+    workbook_site = _dieselstock_site(log_raw)
+    if selected_site and workbook_site != selected_site:
+        raise ValueError(
+            f"Selected site {selected_site} does not match workbook site {workbook_site}."
+        )
+
+    header_idx = None
+    expected_headers = {
+        "date", "time", "asset_id", "class", "meter_type",
+        "meter_reading_at_fill", "litres_dispensed", "activity_code",
+    }
+    for idx, row in log_raw.iterrows():
+        headers = {_diesel_header(value) for value in row.dropna()}
+        if expected_headers.issubset(headers):
+            header_idx = idx
+            break
+    if header_idx is None:
+        raise ValueError(
+            "Could not find the DieselStock header row in 'Dispensing log'."
+        )
+
+    headers = [_diesel_header(value) for value in log_raw.iloc[header_idx].fillna("")]
+    log = log_raw.iloc[header_idx + 1:].copy()
+    log.columns = headers
+    warnings = []
+    rows = []
+    occurrences = Counter()
+
+    for dataframe_idx, row in log.iterrows():
+        row_number = dataframe_idx + 1
+        if pd.isna(row.get("litres_dispensed")):
+            continue
+        try:
+            dispensed_date = _diesel_date(row.get("date"))
+            dispensed_time = _dieselstock_time(row.get("time"))
+            litres = _diesel_litres(row.get("litres_dispensed"))
+            activity_code_raw, activity_code, operation_type = _dieselstock_activity(
+                row.get("activity_code")
+            )
+        except ValueError as exc:
+            warnings.append(f"Dispensing log row {row_number}: {exc}. Skipped.")
+            continue
+        if litres <= 0:
+            continue
+
+        asset_id = _clean_optional_text(row.get("asset_id"), uppercase=True)
+        if asset_id is None:
+            warnings.append(
+                f"Dispensing log row {row_number}: Missing Asset ID; "
+                f"retained {litres:g} L as unassigned."
+            )
+        meter_reading = row.get("meter_reading_at_fill")
+        if pd.isna(meter_reading):
+            meter_reading = None
+        else:
+            try:
+                meter_reading = float(meter_reading)
+            except (TypeError, ValueError):
+                warnings.append(
+                    f"Dispensing log row {row_number}: Invalid meter reading "
+                    f"{meter_reading!r}; stored as blank."
+                )
+                meter_reading = None
+
+        record = {
+            "site": workbook_site,
+            "dispensed_date": dispensed_date,
+            "dispensed_time": dispensed_time,
+            "asset_id": asset_id,
+            "equipment_class": _clean_optional_text(row.get("class")),
+            "meter_type": _clean_optional_text(row.get("meter_type")),
+            "meter_reading": meter_reading,
+            "litres": litres,
+            "activity_code_raw": activity_code_raw,
+            "activity_code": activity_code,
+            "operation_type": operation_type,
+            "is_haulage": operation_type == "HAULAGE",
+            "operator_driver": _clean_optional_text(row.get("operator_/_driver")),
+            "fuel_attendant": _clean_optional_text(row.get("fuel_attendant")),
+            "supervisor_sign_off": _clean_optional_text(row.get("supervisor_sign-off")),
+            "check_status": _clean_optional_text(row.get("check"), uppercase=True),
+        }
+        identity = tuple(record[key] for key in (
+            "site", "dispensed_date", "dispensed_time", "asset_id",
+            "activity_code", "litres",
+        ))
+        occurrences[identity] += 1
+        record["occurrence"] = occurrences[identity]
+        rows.append(record)
+
+    summary = {
+        "site": workbook_site,
+        "activity_totals": {},
+        "class_totals": {},
+        "stock_check": {},
+        "dispensing_log_total_litres": sum(row["litres"] for row in rows),
+    }
+    for _, row in summary_raw.iterrows():
+        activity = _clean_optional_text(row.iloc[0] if len(row) > 0 else None)
+        activity_litres = row.iloc[1] if len(row) > 1 else None
+        equipment_class = _clean_optional_text(row.iloc[4] if len(row) > 4 else None)
+        class_litres = row.iloc[5] if len(row) > 5 else None
+        stock_label = _clean_optional_text(row.iloc[8] if len(row) > 8 else None)
+        stock_value = row.iloc[9] if len(row) > 9 else None
+        if (activity and isinstance(activity_litres, Real)
+                and math.isfinite(float(activity_litres))):
+            summary["activity_totals"][activity] = float(activity_litres)
+        if (equipment_class and isinstance(class_litres, Real)
+                and math.isfinite(float(class_litres))):
+            summary["class_totals"][equipment_class] = float(class_litres)
+        if (stock_label and isinstance(stock_value, Real)
+                and math.isfinite(float(stock_value))):
+            summary["stock_check"][stock_label] = float(stock_value)
+
+    stated_total = summary["stock_check"].get("Dispensed per log (L)")
+    if stated_total is not None and abs(stated_total - summary["dispensing_log_total_litres"]) > 0.01:
+        warnings.append(
+            "Weekly summary mismatch: 'Dispensed per log (L)' is "
+            f"{stated_total:g} L, but parsed dispensing rows total "
+            f"{summary['dispensing_log_total_litres']:g} L."
+        )
+    return rows, summary, warnings
+
+
