@@ -10,6 +10,7 @@ import numpy as np
 import plotly.graph_objects as go
 from datetime import date, timedelta
 from utils.db import fetch_all, fetch_one
+from utils.reporting import diesel_periods
 
 st.set_page_config(page_title="Dashboard · Mosra Energy", layout="wide")
 
@@ -123,6 +124,8 @@ all_weeks_query = """
         UNION
         SELECT (dispensed_date - INTERVAL '1 day' * EXTRACT(DOW FROM dispensed_date)::integer)::date AS week_start_date 
         FROM weekly_diesel_usage
+        UNION
+        SELECT week_start_date FROM diesel_dispensing_log
     ) combined_weeks
     WHERE week_start_date IS NOT NULL AND week_start_date <= CURRENT_DATE
     ORDER BY week_start_date DESC
@@ -152,20 +155,47 @@ has_prev = prev_ws is not None
 # ════════════════════════════════════════════════════════════════════════════
 params = {"ws": selected_ws, "prev_ws": prev_ws}
 
+# New-template rows replace historical rows on the same site/date. This keeps
+# all historical coverage without double-counting dates present in both tables.
+DIESEL_SOURCE_SQL = """
+(
+    SELECT old.site, old.dispensed_date, old.equipment_name,
+           old.equipment_type, old.operation_type, old.litres, old.is_haulage,
+           NULL::text AS activity_code, NULL::text AS activity_code_raw
+    FROM weekly_diesel_usage old
+    WHERE NOT EXISTS (
+        SELECT 1 FROM diesel_dispensing_log new
+        WHERE new.site = old.site
+          AND new.dispensed_date = old.dispensed_date
+    )
+    UNION ALL
+    SELECT new.site, new.dispensed_date, new.asset_id AS equipment_name,
+           new.equipment_class AS equipment_type, new.operation_type,
+           new.litres, new.is_haulage, new.activity_code,
+           new.activity_code_raw
+    FROM diesel_dispensing_log new
+)
+"""
+
 def get_query_conditions(prefix=""):
     if prefix == "du.":
-        col = f"({prefix}dispensed_date - INTERVAL '1 day' * EXTRACT(DOW FROM {prefix}dispensed_date)::integer)::date"
+        current, previous = diesel_periods(view_mode, selected_ws, prev_ws)
+        params.update(diesel_start=current[0], diesel_end=current[1])
+        cur = "du.dispensed_date BETWEEN %(diesel_start)s AND %(diesel_end)s"
+        prv = "1=0"
+        if previous:
+            params.update(diesel_prev_start=previous[0], diesel_prev_end=previous[1])
+            prv = "du.dispensed_date BETWEEN %(diesel_prev_start)s AND %(diesel_prev_end)s"
+        return cur, prv
     else:
         col = f"{prefix}week_start_date"
-    
-    we_expr = f"({col} + INTERVAL '6 days')"
     
     if view_mode == "WoW":
         cur = f"{col} = %(ws)s"
         prv = f"{col} = %(prev_ws)s" if has_prev else "1=0"
     elif view_mode == "MoM":
-        cur = f"DATE_TRUNC('month', {we_expr}) = DATE_TRUNC('month', %(ws)s::date + INTERVAL '6 days') AND {col} <= %(ws)s"
-        prv = f"DATE_TRUNC('month', {we_expr}) = DATE_TRUNC('month', %(ws)s::date + INTERVAL '6 days' - INTERVAL '1 month') AND {col} <= %(ws)s - INTERVAL '28 days'"
+        cur = f"DATE_TRUNC('month', {col}) = DATE_TRUNC('month', %(ws)s::date) AND {col} <= %(ws)s"
+        prv = f"DATE_TRUNC('month', {col}) = DATE_TRUNC('month', %(ws)s::date - INTERVAL '1 month') AND {col} <= %(ws)s - INTERVAL '1 month'"
     elif view_mode == "YTD":
         cur = f"{col} >= DATE_TRUNC('year', %(ws)s::date) AND {col} <= %(ws)s"
         prv = "1=0"
@@ -197,7 +227,7 @@ def fetch_diesel(where_clause, site_val):
     return fetch_one(f"""
         SELECT SUM(du.litres) AS total, SUM(du.litres) FILTER(WHERE du.is_haulage) AS haulage,
                SUM(du.litres) FILTER(WHERE NOT du.is_haulage) AS non_haulage
-        FROM weekly_diesel_usage du WHERE {where_clause} AND du.site = %(site)s""", p) or {}
+        FROM {DIESEL_SOURCE_SQL} du WHERE {where_clause} AND du.site = %(site)s""", p) or {}
 
 def fetch_diesel_breakdown(where_clause, site_val):
     p = params.copy(); p["site"] = site_val
@@ -207,7 +237,7 @@ def fetch_diesel_breakdown(where_clause, site_val):
             SUM(du.litres) FILTER(WHERE UPPER(TRIM(du.operation_type)) LIKE '%%COAL MINING%%' OR UPPER(TRIM(du.operation_type)) LIKE '%%COAL MINNING%%') AS coal_mining,
             SUM(du.litres) FILTER(WHERE UPPER(TRIM(du.operation_type)) LIKE '%%LOCAL MINER%%') AS local_miners,
             SUM(du.litres) FILTER(WHERE UPPER(TRIM(du.operation_type)) LIKE '%%OB OPERATION%%' OR UPPER(TRIM(du.operation_type)) LIKE '%%OVERBURDEN%%') AS overburden
-        FROM weekly_diesel_usage du
+        FROM {DIESEL_SOURCE_SQL} du
         WHERE {where_clause} AND du.site = %(site)s
     """, p) or {}
 
@@ -233,9 +263,9 @@ if view_mode == "WoW":
     badge = f'<span class="week-badge">📅 {selected_ws.strftime("%d %b %Y")} → {sel_we.strftime("%d %b %Y")}</span>'
     if has_prev: badge += f'<span class="week-badge week-badge-prev">vs {prev_ws.strftime("%d %b %Y")}</span>'
 elif view_mode == "MoM":
-    badge = f'<span class="week-badge">📅 MTD ({sel_we.strftime("%B %Y")})</span><span class="week-badge week-badge-prev">vs Prior MTD</span>'
+    badge = f'<span class="week-badge">📅 MTD ({selected_ws.strftime("%B %Y")})</span><span class="week-badge week-badge-prev">vs Prior MTD</span>'
 elif view_mode == "YTD":
-    badge = f'<span class="week-badge week-badge-ytd">📅 YTD — 1 Jan {selected_ws.year} → {selected_ws.strftime("%d %b %Y")}</span>'
+    badge = f'<span class="week-badge week-badge-ytd">📅 YTD — 1 Jan {selected_ws.year} → {params["diesel_end"].strftime("%d %b %Y")}</span>'
 elif view_mode == "YoY":
     badge = f'<span class="week-badge week-badge-ytd">📅 YTD ({selected_ws.year})</span><span class="week-badge week-badge-prev">vs YTD ({selected_ws.year - 1})</span>'
 
@@ -367,11 +397,109 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
     df_d = pd.DataFrame(fetch_all(f"""
         SELECT (du.dispensed_date - INTERVAL '1 day' * EXTRACT(DOW FROM du.dispensed_date)::integer)::date AS week_start,
                SUM(du.litres) FILTER(WHERE du.is_haulage) AS haulage, SUM(du.litres) FILTER(WHERE NOT du.is_haulage) AS non_haulage
-        FROM weekly_diesel_usage du WHERE du.dispensed_date >= DATE_TRUNC('year', %(ws)s::date) AND du.dispensed_date <= CURRENT_DATE AND du.site = %(site)s
+        FROM {DIESEL_SOURCE_SQL} du WHERE du.dispensed_date >= DATE_TRUNC('year', %(ws)s::date) AND du.dispensed_date <= LEAST(%(ws)s::date + 6, (DATE_TRUNC('year', %(ws)s::date) + INTERVAL '1 year - 1 day')::date) AND du.site = %(site)s
         GROUP BY 1 ORDER BY 1""", p_site))
+
+    # DieselStock Weekly summary visuals use the selected week, independent of
+    # the KPI comparison mode, mirroring the workbook's Weekly summary sheet.
+    df_d_activity = pd.DataFrame(fetch_all("""
+        SELECT COALESCE(NULLIF(TRIM(activity_code_raw), ''), operation_type) AS activity,
+               SUM(litres) AS litres, COUNT(*) AS fills
+        FROM diesel_dispensing_log
+        WHERE site = %(site)s
+          AND dispensed_date BETWEEN %(ws)s AND %(ws)s::date + 6
+        GROUP BY 1 ORDER BY litres DESC
+    """, p_site))
+    df_d_class = pd.DataFrame(fetch_all("""
+        SELECT COALESCE(NULLIF(TRIM(equipment_class), ''), 'Unassigned') AS equipment_class,
+               SUM(litres) AS litres, COUNT(*) AS fills
+        FROM diesel_dispensing_log
+        WHERE site = %(site)s
+          AND dispensed_date BETWEEN %(ws)s AND %(ws)s::date + 6
+        GROUP BY 1 ORDER BY litres DESC
+    """, p_site))
+    diesel_stock = fetch_one("""
+        SELECT opening_dip_litres, received_litres, dispensed_log_litres,
+               book_closing_litres, closing_dip_litres, variance_litres,
+               variance_percent
+        FROM diesel_weekly_summary
+        WHERE site = %(site)s AND week_start_date = %(ws)s
+    """, p_site) or {}
 
     # 3. Detailed Analytics Section Title
     st.markdown(f'<div class="sec-hdr">Detailed Analytics — {site_name}</div>', unsafe_allow_html=True)
+
+    if not df_d_activity.empty or not df_d_class.empty or diesel_stock:
+        st.markdown(
+            '<div class="sec-hdr">⛽ DieselStock Weekly Summary</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"Selected week: {selected_ws.strftime('%d %b %Y')} to "
+            f"{(selected_ws + timedelta(days=6)).strftime('%d %b %Y')}"
+        )
+
+        if diesel_stock:
+            stock_metrics = [
+                ("Opening dip", diesel_stock.get("opening_dip_litres"), "L"),
+                ("Received", diesel_stock.get("received_litres"), "L"),
+                ("Dispensed", diesel_stock.get("dispensed_log_litres"), "L"),
+                ("Book closing", diesel_stock.get("book_closing_litres"), "L"),
+                ("Closing dip", diesel_stock.get("closing_dip_litres"), "L"),
+                ("Variance", diesel_stock.get("variance_litres"), "L"),
+            ]
+            metric_cols = st.columns(6)
+            for metric_col, (label, value, unit) in zip(metric_cols, stock_metrics):
+                display = "—" if value is None else f"{float(value):,.0f} {unit}"
+                metric_col.metric(label, display)
+            variance_pct = diesel_stock.get("variance_percent")
+            if variance_pct is not None:
+                st.caption(f"Physical stock variance: {float(variance_pct):.1%} of dispensed fuel")
+
+        activity_col, class_col = st.columns(2)
+        with activity_col:
+            st.markdown(
+                '<div style="color:#94a3b8;font-size:12px;font-weight:600;">'
+                'Litres by Activity</div>', unsafe_allow_html=True,
+            )
+            if not df_d_activity.empty:
+                df_d_activity["litres"] = df_d_activity["litres"].astype(float)
+                fig_activity = go.Figure(go.Bar(
+                    x=df_d_activity["litres"], y=df_d_activity["activity"],
+                    orientation="h", marker_color=TEAL,
+                    customdata=df_d_activity["fills"],
+                    hovertemplate="<b>%{y}</b><br>%{x:,.0f} L<br>%{customdata} fills<extra></extra>",
+                ))
+                fig_activity.update_layout(
+                    **LAY, height=max(300, 28 * len(df_d_activity)),
+                    xaxis_title="Litres", yaxis_title="", yaxis_autorange="reversed",
+                )
+                st.plotly_chart(fig_activity, use_container_width=True)
+            else:
+                st.markdown('<div class="no-data">No new-template activity data.</div>', unsafe_allow_html=True)
+
+        with class_col:
+            st.markdown(
+                '<div style="color:#94a3b8;font-size:12px;font-weight:600;">'
+                'Litres and Fills by Equipment Class</div>', unsafe_allow_html=True,
+            )
+            if not df_d_class.empty:
+                df_d_class["litres"] = df_d_class["litres"].astype(float)
+                fig_class = go.Figure(go.Bar(
+                    x=df_d_class["litres"], y=df_d_class["equipment_class"],
+                    orientation="h", marker_color=AMBER,
+                    customdata=df_d_class["fills"],
+                    text=df_d_class["fills"].map(lambda value: f"{value} fills"),
+                    textposition="outside",
+                    hovertemplate="<b>%{y}</b><br>%{x:,.0f} L<br>%{customdata} fills<extra></extra>",
+                ))
+                fig_class.update_layout(
+                    **LAY, height=max(300, 28 * len(df_d_class)),
+                    xaxis_title="Litres", yaxis_title="", yaxis_autorange="reversed",
+                )
+                st.plotly_chart(fig_class, use_container_width=True)
+            else:
+                st.markdown('<div class="no-data">No new-template class data.</div>', unsafe_allow_html=True)
 
     # 4. Charts: Row 1 (Pie Charts)
     c1, c2 = st.columns(2)
@@ -570,8 +698,8 @@ def render_site_tab(site_name, cur_m, prv_m, cur_c, prv_c, cur_d, prv_d, cur_di,
     # 8. Equipment Diesel Table
     st.markdown('<div class="sec-hdr">🚜 Equipment Diesel Usage</div>', unsafe_allow_html=True)
     df_eq = pd.DataFrame(fetch_all(f"""
-        SELECT du.equipment_name AS equipment, COALESCE(NULLIF(TRIM(du.equipment_type),''), 'UNKNOWN') AS equipment_type, SUM(du.litres) AS litres
-        FROM weekly_diesel_usage du WHERE {cur_d_wh} AND du.site = %(site)s
+        SELECT COALESCE(NULLIF(TRIM(du.equipment_name), ''), 'UNASSIGNED') AS equipment, COALESCE(NULLIF(TRIM(du.equipment_type),''), 'UNKNOWN') AS equipment_type, SUM(du.litres) AS litres
+        FROM {DIESEL_SOURCE_SQL} du WHERE {cur_d_wh} AND du.site = %(site)s
         GROUP BY du.equipment_name, du.equipment_type ORDER BY litres DESC""", p_site))
 
     if not df_eq.empty:
